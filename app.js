@@ -1,6 +1,7 @@
 /**
  * POCKET LAB // Drum Practice Player
- * Pitch-Neutral Multi-Stem Audio Engine, Interactive Waveform, A-B Loop + Pre-Roll,
+ * Pitch-Neutral Multi-Stem Audio Engine, High-Precision Audio DSP BPM & Beat-Phase Detector,
+ * Sample-Accurate Lookahead Metronome, Interactive Waveform, A-B Loop + Pre-Roll,
  * Speed-Trainer, Visual & Audible Count-In, and Foot-Pedal / Keyboard Control.
  */
 
@@ -10,6 +11,7 @@ const DEFAULT_SONGS = [
     title: 'Neon Pocket Groove',
     subtitle: 'Tight Ghost-Notes & Syncopated Kick',
     bpm: 108,
+    beatOffset: 0.0,
     timeSignature: '4/4',
     beatsPerBar: 4,
     duration: 35.55,
@@ -33,6 +35,7 @@ const DEFAULT_SONGS = [
     title: 'Autobahn Overdrive',
     subtitle: 'Driving 8th-Note Rock & Halftime Bridge',
     bpm: 142,
+    beatOffset: 0.0,
     timeSignature: '4/4',
     beatsPerBar: 4,
     duration: 33.8,
@@ -56,6 +59,7 @@ const DEFAULT_SONGS = [
     title: 'Midnight Soul Ballad',
     subtitle: 'Slow 6/8 Purdie-Style Shuffle',
     bpm: 78,
+    beatOffset: 0.0,
     timeSignature: '6/8',
     beatsPerBar: 6,
     duration: 36.92,
@@ -77,6 +81,7 @@ const DEFAULT_SONGS = [
     title: 'Apex Endurance Protocol',
     subtitle: 'Fast Punk / Metal Stamina Track',
     bpm: 168,
+    beatOffset: 0.0,
     timeSignature: '4/4',
     beatsPerBar: 4,
     duration: 28.57,
@@ -100,6 +105,269 @@ const DEFAULT_SONGS = [
 const STORAGE_KEY = 'pocketlab_drum_practice_state_v1';
 const IDB_NAME = 'pocketlab_audio_db';
 const IDB_STORE = 'custom_tracks';
+
+/**
+ * High-Precision Audio DSP BPM & Beat-Phase Analyzer
+ * Uses Dual-Band Onset Flux (Kick Low-Pass <180Hz + Transient High-Pass) at 200Hz resolution,
+ * Harmonic Comb-Filter Autocorrelation, Studio-Grid Refinement, and Phase-Lock Sweep.
+ */
+class BpmAnalyzer {
+  static analyzeAudioBuffer(audioBuffer) {
+    const sr = audioBuffer.sampleRate;
+    const raw = audioBuffer.getChannelData(0);
+    const totalLen = raw.length;
+    if (totalLen < sr * 2) {
+      return { bpm: 120, beatOffset: 0, confidence: 0 };
+    }
+
+    // 1. Build 200 Hz (5 ms) Multi-Band Onset Strength Envelope over up to 75 seconds
+    const envRate = 200;
+    const hop = Math.max(1, Math.floor(sr / envRate));
+    const actualEnvRate = sr / hop;
+
+    const maxAnalyzeSamples = Math.min(totalLen, Math.floor(sr * 75));
+    const numFrames = Math.floor(maxAnalyzeSamples / hop);
+    const onsetEnv = new Float32Array(numFrames);
+
+    // 1-pole low-pass filter at ~160 Hz to isolate Kick & Bass transients
+    const rc = 1.0 / (2 * Math.PI * 160);
+    const dt = 1.0 / sr;
+    const alpha = dt / (rc + dt);
+
+    let lpState = 0;
+    let prevLowEnergy = 0;
+    let prevHighEnergy = 0;
+
+    for (let f = 0; f < numFrames; f++) {
+      const start = f * hop;
+      let lowSum = 0;
+      let highSum = 0;
+      for (let i = 0; i < hop; i++) {
+        const s = raw[start + i];
+        lpState += alpha * (s - lpState);
+        const hp = s - lpState;
+        lowSum += lpState * lpState;
+        highSum += hp * hp;
+      }
+
+      const lowRms = Math.log1p(40 * Math.sqrt(lowSum / hop));
+      const highRms = Math.log1p(40 * Math.sqrt(highSum / hop));
+
+      const dLow = Math.max(0, lowRms - prevLowEnergy);
+      const dHigh = Math.max(0, highRms - prevHighEnergy);
+      prevLowEnergy = lowRms;
+      prevHighEnergy = highRms;
+
+      // Weight kick/bass transients strongly + snare/hat attack flux
+      onsetEnv[f] = dLow * 0.68 + dHigh * 0.32;
+    }
+
+    // 2. Subtract local moving average (0.25s window) so only sharp percussion attacks remain
+    const winRadius = Math.floor(actualEnvRate * 0.125);
+    const cleanEnv = new Float32Array(numFrames);
+    let runningSum = 0;
+    let maxOnset = 0.0001;
+
+    for (let i = 0; i < numFrames; i++) {
+      runningSum += onsetEnv[i];
+      if (i >= winRadius * 2) {
+        runningSum -= onsetEnv[i - winRadius * 2];
+      }
+      const count = Math.min(i + 1, winRadius * 2);
+      const localMean = runningSum / count;
+      const val = Math.max(0, onsetEnv[i] - localMean * 1.15);
+      cleanEnv[i] = val;
+      if (val > maxOnset) maxOnset = val;
+    }
+
+    for (let i = 0; i < numFrames; i++) {
+      cleanEnv[i] /= maxOnset;
+    }
+
+    // Focus tempo autocorrelation on the most energetic 45-second slice
+    const sliceFrames = Math.min(numFrames, Math.floor(actualEnvRate * 45));
+    let bestSliceStart = 0;
+    if (numFrames > sliceFrames) {
+      let bestEnergy = -1;
+      const stepFrames = Math.floor(actualEnvRate * 2);
+      for (let start = 0; start + sliceFrames < numFrames; start += stepFrames) {
+        let e = 0;
+        for (let k = start; k < start + sliceFrames; k += 4) e += cleanEnv[k];
+        if (e > bestEnergy) {
+          bestEnergy = e;
+          bestSliceStart = start;
+        }
+      }
+    }
+
+    // 3. Stage 1: Harmonic Comb-Filter Autocorrelation across 68 - 185 BPM
+    const minBpm = 68;
+    const maxBpm = 185;
+    const coarseStep = 0.25;
+    let bestCoarseBpm = 120;
+    let bestCoarseScore = -1;
+
+    const autocorrAtLag = (lagFrames) => {
+      const lag = Math.round(lagFrames);
+      if (lag < 2 || lag >= sliceFrames / 2) return 0;
+      let sum = 0;
+      const end = bestSliceStart + sliceFrames - lag;
+      for (let i = bestSliceStart; i < end; i++) {
+        // Slight 3-tap smoothing on target lag to tolerate micro-timing swing
+        const target =
+          cleanEnv[i + lag] * 0.6 +
+          cleanEnv[i + lag - 1] * 0.2 +
+          cleanEnv[i + Math.min(numFrames - 1, lag + 1)] * 0.2;
+        sum += cleanEnv[i] * target;
+      }
+      return sum / (sliceFrames - lag);
+    };
+
+    const candidates = [];
+    for (let bpm = minBpm; bpm <= maxBpm; bpm += coarseStep) {
+      const lag = (60 / bpm) * actualEnvRate;
+      const r1 = autocorrAtLag(lag);
+      const r2 = autocorrAtLag(lag * 2);
+      const r3 = autocorrAtLag(lag * 3);
+      const r4 = autocorrAtLag(lag * 4);
+      const rHalf = autocorrAtLag(lag * 0.5);
+
+      // Perceptual tempo prior: gently favors standard drum tempos (85 - 155 BPM) over octave extremes
+      const logRatio = Math.log2(bpm / 118);
+      const prior = Math.exp(-0.5 * Math.pow(logRatio / 0.58, 2));
+
+      const rawComb = r1 * 1.15 + r2 * 0.85 + r3 * 0.45 + r4 * 1.1 + rHalf * 0.3;
+      const score = rawComb * (0.72 + 0.28 * prior);
+      candidates.push({ bpm, score });
+
+      if (score > bestCoarseScore) {
+        bestCoarseScore = score;
+        bestCoarseBpm = bpm;
+      }
+    }
+
+    // 4. Stage 2: High-Resolution Pulse-Train Phase-Correlation around the peak (0.05 BPM resolution)
+    const evaluatePulseTrain = (testBpm) => {
+      const periodFrames = (60 / testBpm) * actualEnvRate;
+      const numPhases = Math.min(120, Math.max(24, Math.floor(periodFrames)));
+      let maxPhaseScore = 0;
+      let bestPhaseFrames = 0;
+
+      for (let p = 0; p < numPhases; p++) {
+        const phaseOffset = (p / numPhases) * periodFrames;
+        let sum = 0;
+        let count = 0;
+        for (
+          let pos = bestSliceStart + phaseOffset;
+          pos < bestSliceStart + sliceFrames - 1;
+          pos += periodFrames
+        ) {
+          const idx = Math.round(pos);
+          // 3-frame window (+/- 5ms) around each predicted beat
+          const peakLocal = Math.max(
+            cleanEnv[Math.max(0, idx - 1)],
+            cleanEnv[idx],
+            cleanEnv[Math.min(numFrames - 1, idx + 1)]
+          );
+          sum += peakLocal;
+          count++;
+        }
+        const avg = count > 0 ? sum / count : 0;
+        if (avg > maxPhaseScore) {
+          maxPhaseScore = avg;
+          bestPhaseFrames = phaseOffset;
+        }
+      }
+      return { score: maxPhaseScore, phaseFrames: bestPhaseFrames };
+    };
+
+    let refinedBpm = bestCoarseBpm;
+    let bestPulseScore = -1;
+
+    for (let delta = -1.5; delta <= 1.5; delta += 0.05) {
+      const candidateBpm = Number((bestCoarseBpm + delta).toFixed(2));
+      if (candidateBpm < minBpm || candidateBpm > maxBpm) continue;
+      const res = evaluatePulseTrain(candidateBpm);
+      if (res.score > bestPulseScore) {
+        bestPulseScore = res.score;
+        refinedBpm = candidateBpm;
+      }
+    }
+
+    // Studio Grid Snap: if an exact integer BPM (or .5 BPM) achieves >= 98.5% of the peak pulse score,
+    // snap to the integer BPM so the click never drifts on studio recordings.
+    const nearestInt = Math.round(refinedBpm);
+    if (Math.abs(nearestInt - refinedBpm) <= 0.45) {
+      const intCheck = evaluatePulseTrain(nearestInt);
+      if (intCheck.score >= bestPulseScore * 0.985) {
+        refinedBpm = nearestInt;
+      } else {
+        const nearestHalf = Math.round(refinedBpm * 2) / 2;
+        const halfCheck = evaluatePulseTrain(nearestHalf);
+        if (halfCheck.score >= bestPulseScore * 0.99) {
+          refinedBpm = nearestHalf;
+        } else {
+          refinedBpm = Number(refinedBpm.toFixed(1));
+        }
+      }
+    } else {
+      refinedBpm = Number(refinedBpm.toFixed(1));
+    }
+
+    // 5. Stage 3: Find Global Beat-Phase Offset & First Musical Downbeat (beatOffset in seconds)
+    const beatPeriodSec = 60 / refinedBpm;
+    const beatPeriodFrames = beatPeriodSec * actualEnvRate;
+    const phaseSteps = 160;
+    let bestGlobalPhaseSec = 0;
+    let bestGlobalPhaseScore = -1;
+
+    for (let p = 0; p < phaseSteps; p++) {
+      const phaseSec = (p / phaseSteps) * beatPeriodSec;
+      const phaseFrames = phaseSec * actualEnvRate;
+      let score = 0;
+      let hits = 0;
+      for (let f = phaseFrames; f < numFrames - 1; f += beatPeriodFrames) {
+        const idx = Math.round(f);
+        score += Math.max(
+          cleanEnv[Math.max(0, idx - 1)],
+          cleanEnv[idx],
+          cleanEnv[Math.min(numFrames - 1, idx + 1)]
+        );
+        hits++;
+      }
+      const norm = hits > 0 ? score / hits : 0;
+      if (norm > bestGlobalPhaseScore) {
+        bestGlobalPhaseScore = norm;
+        bestGlobalPhaseSec = phaseSec;
+      }
+    }
+
+    // Find the first audible beat in the song along this phase grid (skip leading silence)
+    let firstBeatSec = bestGlobalPhaseSec;
+    for (let k = 0; k < 32; k++) {
+      const candidateSec = bestGlobalPhaseSec + k * beatPeriodSec;
+      const idx = Math.round(candidateSec * actualEnvRate);
+      if (idx >= numFrames - 2) break;
+      const localPeak = Math.max(
+        cleanEnv[Math.max(0, idx - 2)],
+        cleanEnv[Math.max(0, idx - 1)],
+        cleanEnv[idx],
+        cleanEnv[Math.min(numFrames - 1, idx + 1)],
+        cleanEnv[Math.min(numFrames - 1, idx + 2)]
+      );
+      if (localPeak >= 0.18) {
+        firstBeatSec = candidateSec;
+        break;
+      }
+    }
+
+    return {
+      bpm: refinedBpm,
+      beatOffset: Number(firstBeatSec.toFixed(3)),
+      confidence: Math.min(1, bestGlobalPhaseScore * 2.5)
+    };
+  }
+}
 
 class CustomTrackDB {
   static open() {
@@ -143,20 +411,6 @@ class CustomTrackDB {
       return [];
     }
   }
-
-  static async deleteTrack(id) {
-    try {
-      const db = await this.open();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction(IDB_STORE, 'readwrite');
-        tx.objectStore(IDB_STORE).delete(id);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch {
-      // Ignore
-    }
-  }
 }
 
 class DrumPracticeApp {
@@ -172,6 +426,9 @@ class DrumPracticeApp {
     this.drumsAudio = new Audio();
     this.bandAudio.preservesPitch = true;
     this.drumsAudio.preservesPitch = true;
+
+    // Decoded AudioBuffer cache for active song re-analysis
+    this.decodedBufferCache = new Map();
 
     // Waveform peak arrays (normalized 0..1)
     this.bandPeaks = [];
@@ -204,8 +461,10 @@ class DrumPracticeApp {
     this.bandMuted = false;
     this.clickMuted = false;
 
-    // Metronome Beat Tracking
-    this.lastBeatIndex = -1;
+    // Sample-Accurate Metronome Scheduling & Tap Tempo
+    this.lastScheduledBeatIndex = -99999;
+    this.lastVisualBeatIndex = -99999;
+    this.tapTimes = [];
     this.rafId = null;
     this.draggingHandle = null;
 
@@ -286,18 +545,24 @@ class DrumPracticeApp {
       trainerIntervalInput: document.getElementById('trainerIntervalInput'),
       trainerTargetInput: document.getElementById('trainerTargetInput'),
 
-      drumlessQuickBtn: document.getElementById('drumlessQuickBtn'),
-      drumsVolSlider: document.getElementById('drumsVolSlider'),
-      drumsVolLabel: document.getElementById('drumsVolLabel'),
-      muteDrumsBtn: document.getElementById('muteDrumsBtn'),
-
-      bandVolSlider: document.getElementById('bandVolSlider'),
-      bandVolLabel: document.getElementById('bandVolLabel'),
-      muteBandBtn: document.getElementById('muteBandBtn'),
-
-      clickVolSlider: document.getElementById('clickVolSlider'),
-      clickVolLabel: document.getElementById('clickVolLabel'),
       muteClickBtn: document.getElementById('muteClickBtn'),
+      clickToggleIcon: document.getElementById('clickToggleIcon'),
+      clickToggleTitle: document.getElementById('clickToggleTitle'),
+      clickToggleSub: document.getElementById('clickToggleSub'),
+      clickStatusBadge: document.getElementById('clickStatusBadge'),
+
+      // Precision Click Sync & BPM Controls
+      autoDetectActiveBtn: document.getElementById('autoDetectActiveBtn'),
+      tapTempoBtn: document.getElementById('tapTempoBtn'),
+      bpmDecBtn: document.getElementById('bpmDecBtn'),
+      bpmIncBtn: document.getElementById('bpmIncBtn'),
+      liveBpmInput: document.getElementById('liveBpmInput'),
+      bpmHalfBtn: document.getElementById('bpmHalfBtn'),
+      bpmDoubleBtn: document.getElementById('bpmDoubleBtn'),
+      beatOffsetLabel: document.getElementById('beatOffsetLabel'),
+      nudgeLeftBtn: document.getElementById('nudgeLeftBtn'),
+      syncDownbeatHereBtn: document.getElementById('syncDownbeatHereBtn'),
+      nudgeRightBtn: document.getElementById('nudgeRightBtn'),
 
       songNotesArea: document.getElementById('songNotesArea'),
       notesSavedIndicator: document.getElementById('notesSavedIndicator'),
@@ -311,7 +576,13 @@ class DrumPracticeApp {
       openUploadModalBtn: document.getElementById('openUploadModalBtn'),
       closeModalBtn: document.getElementById('closeModalBtn'),
       cancelModalBtn: document.getElementById('cancelModalBtn'),
-      addSongForm: document.getElementById('addSongForm')
+      addSongForm: document.getElementById('addSongForm'),
+      bandFileInput: document.getElementById('bandFileInput'),
+      songBpmInput: document.getElementById('songBpmInput'),
+      songOffsetInput: document.getElementById('songOffsetInput'),
+      bpmDetectStatus: document.getElementById('bpmDetectStatus'),
+      bpmDetectText: document.getElementById('bpmDetectText'),
+      reanalyzeModalBtn: document.getElementById('reanalyzeModalBtn')
     };
   }
 
@@ -333,7 +604,7 @@ class DrumPracticeApp {
         loadedSongs = await res.json();
       }
     } catch {
-      // Use embedded DEFAULT_SONGS if opened via file:// protocol
+      // Fallback to embedded DEFAULT_SONGS
     }
 
     const savedState = this.loadSavedState();
@@ -344,6 +615,8 @@ class DrumPracticeApp {
       return {
         ...rec.songMeta,
         isCustomUpload: true,
+        bandBlob: rec.bandBlob || null,
+        drumsBlob: rec.drumsBlob || null,
         audio: { band: bandUrl, drums: drumsUrl }
       };
     });
@@ -353,6 +626,8 @@ class DrumPracticeApp {
       const custom = savedState[song.id] || {};
       return {
         ...song,
+        bpm: custom.bpm ?? song.bpm ?? 120,
+        beatOffset: custom.beatOffset ?? song.beatOffset ?? 0.0,
         rating: custom.rating ?? song.rating ?? 3,
         notes: custom.notes ?? song.notes ?? '',
         markers: custom.markers ?? song.markers ?? [],
@@ -377,6 +652,8 @@ class DrumPracticeApp {
     try {
       const state = this.loadSavedState();
       state[song.id] = {
+        bpm: song.bpm,
+        beatOffset: song.beatOffset ?? 0,
         rating: song.rating,
         notes: song.notes,
         markers: song.markers,
@@ -384,7 +661,7 @@ class DrumPracticeApp {
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch {
-      // Ignore storage quota errors
+      // Ignore quota errors
     }
   }
 
@@ -464,6 +741,9 @@ class DrumPracticeApp {
     const song = this.songs.find((s) => s.id === songId);
     if (!song) return;
     this.activeSong = song;
+    if (typeof song.beatOffset !== 'number' || !isFinite(song.beatOffset)) {
+      song.beatOffset = 0.0;
+    }
 
     // Header UI
     this.dom.activeSongTitle.textContent = song.title;
@@ -490,6 +770,7 @@ class DrumPracticeApp {
     this.updateLoopUi();
     this.renderMarkers();
     this.updateTempoUi();
+    this.updateSyncCalibrationUi();
     this.renderSongList();
     this.drawWaveform();
   }
@@ -513,10 +794,9 @@ class DrumPracticeApp {
         this.bandPeaks = song.customPeaks.band;
         this.drumPeaks = song.customPeaks.drums;
       } else {
-        this.generateProceduralPeaks(song);
+        this.generateProceduralPeaks();
       }
     } else {
-      // Generate realistic Multi-Stem practice audio in-memory (Band stem + Drum stem)
       let cached = this.synthCache.get(song.id);
       if (!cached) {
         cached = this.generateDemoStems(song);
@@ -537,10 +817,73 @@ class DrumPracticeApp {
   }
 
   /**
-   * Generates two synchronized WAV stems (Band Backing + Original Drum Kit)
-   * so that waveform visualization, pitch-neutral speed scaling, and Drumless muting
-   * work immediately out of the box.
+   * Re-analyzes the currently active song's audio buffer to detect exact BPM and Beat-1 offset.
    */
+  async autoAnalyzeActiveSong() {
+    if (!this.activeSong) return;
+    const btn = this.dom.autoDetectActiveBtn;
+    const origText = btn.textContent;
+    btn.textContent = '⏳ Analysiere...';
+    btn.disabled = true;
+
+    try {
+      this.ensureAudioContext();
+      let audioBuffer = this.decodedBufferCache.get(this.activeSong.id);
+      if (!audioBuffer) {
+        // Prefer separate drum stem if available, otherwise band stem
+        const targetUrl =
+          (this.activeSong.audio && (this.activeSong.audio.drums || this.activeSong.audio.band)) ||
+          this.bandAudio.src;
+        const resp = await fetch(targetUrl);
+        const arrayBuf = await resp.arrayBuffer();
+        audioBuffer = await this.audioCtx.decodeAudioData(arrayBuf.slice(0));
+        this.decodedBufferCache.set(this.activeSong.id, audioBuffer);
+      }
+
+      const result = BpmAnalyzer.analyzeAudioBuffer(audioBuffer);
+      this.activeSong.bpm = result.bpm;
+      this.activeSong.beatOffset = result.beatOffset;
+      this.saveSongState(this.activeSong);
+      this.lastScheduledBeatIndex = -99999;
+      this.updateTempoUi();
+      this.updateSyncCalibrationUi();
+      this.renderSongList();
+      this.drawWaveform();
+      btn.textContent = `✓ ${result.bpm} BPM`;
+      setTimeout(() => {
+        btn.textContent = origText;
+      }, 1800);
+    } catch {
+      btn.textContent = origText;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /**
+   * Analyzes an uploaded File object in the Upload Modal and populates BPM & Beat-Offset automatically.
+   */
+  async analyzeUploadedFileInModal(file) {
+    if (!file) return;
+    this.dom.bpmDetectStatus.classList.remove('hidden');
+    this.dom.bpmDetectText.textContent = '🔍 Analysiere Audio-Transienten für exakte BPM & Takt-Phase...';
+
+    try {
+      this.ensureAudioContext();
+      const arrayBuf = await file.arrayBuffer();
+      const decoded = await this.audioCtx.decodeAudioData(arrayBuf.slice(0));
+      const result = BpmAnalyzer.analyzeAudioBuffer(decoded);
+
+      this.dom.songBpmInput.value = String(result.bpm);
+      this.dom.songOffsetInput.value = String(result.beatOffset);
+      this.dom.bpmDetectText.textContent = `✓ Erkannt: ${result.bpm} BPM · Beat-1 Start bei +${result.beatOffset.toFixed(3)}s`;
+      return { decoded, result };
+    } catch {
+      this.dom.bpmDetectText.textContent = '⚠ Automatische Erkennung nicht möglich – bitte BPM manuell eingeben.';
+      return null;
+    }
+  }
+
   generateDemoStems(song) {
     const sampleRate = 22050;
     const beatsPerBar = song.beatsPerBar || 4;
@@ -553,18 +896,17 @@ class DrumPracticeApp {
     const bandSamples = new Float32Array(totalSamples);
     const drumSamples = new Float32Array(totalSamples);
 
-    // Chord root frequencies (Hz) for 4-bar progression
     const roots =
       song.demoSynth === 'funk'
-        ? [110, 130.81, 146.83, 123.47] // A7 - C7 - D7 - B7
+        ? [110, 130.81, 146.83, 123.47]
         : song.demoSynth === 'rock'
-        ? [82.41, 110.0, 123.47, 98.0] // E - A - B - G
+        ? [82.41, 110.0, 123.47, 98.0]
         : song.demoSynth === 'ballad68'
-        ? [98.0, 82.41, 130.81, 146.83] // G - Em - C - D
-        : [73.42, 77.78, 87.31, 65.41]; // D - D# - F - C
+        ? [98.0, 82.41, 130.81, 146.83]
+        : [73.42, 77.78, 87.31, 65.41];
 
     const totalBeats = totalBars * beatsPerBar;
-    const subStepsPerBeat = song.timeSignature === '6/8' ? 2 : 4; // 16th notes in 4/4
+    const subStepsPerBeat = song.timeSignature === '6/8' ? 2 : 4;
     const totalSubSteps = totalBeats * subStepsPerBeat;
     const stepDur = beatDur / subStepsPerBeat;
 
@@ -576,8 +918,6 @@ class DrumPracticeApp {
       const beatInBar = beatInSong % beatsPerBar;
       const isFillBar = barIndex % 4 === 3 && beatInBar >= beatsPerBar - 2;
 
-      // --- 1. DRUM STEM SYNTHESIS ---
-      // Kick Drum
       let triggerKick = false;
       if (song.demoSynth === 'funk') {
         triggerKick =
@@ -591,7 +931,6 @@ class DrumPracticeApp {
       } else if (song.demoSynth === 'ballad68') {
         triggerKick = (beatInBar === 0 && subInBeat === 0) || (beatInBar === 2 && subInBeat === 1);
       } else {
-        // Fast double-kick stamina
         triggerKick = subInBeat === 0 || subInBeat === 2;
       }
 
@@ -599,7 +938,6 @@ class DrumPracticeApp {
         this.addSynthKick(drumSamples, stepStartSample, sampleRate, 0.85);
       }
 
-      // Snare / Ghost Notes / Tom Fill
       let snareVel = 0;
       if (isFillBar) {
         snareVel = subInBeat % 2 === 0 ? 0.85 : 0.55;
@@ -609,7 +947,7 @@ class DrumPracticeApp {
         if ((beatInBar === 1 || beatInBar === 3) && subInBeat === 0) {
           snareVel = 0.92;
         } else if (song.demoSynth === 'funk' && (subInBeat === 1 || subInBeat === 3) && step % 3 === 0) {
-          snareVel = 0.24; // Ghost note!
+          snareVel = 0.24;
         }
       }
 
@@ -617,7 +955,6 @@ class DrumPracticeApp {
         this.addSynthSnare(drumSamples, stepStartSample, sampleRate, snareVel, isFillBar ? (step % 4) * 35 : 0);
       }
 
-      // Hi-Hat / Crash on section start
       const isSectionStart = barIndex % 4 === 0 && beatInBar === 0 && subInBeat === 0;
       if (isSectionStart) {
         this.addSynthCymbal(drumSamples, stepStartSample, sampleRate, 0.45, 0.55);
@@ -625,7 +962,6 @@ class DrumPracticeApp {
         this.addSynthCymbal(drumSamples, stepStartSample, sampleRate, 0.22, 0.045);
       }
 
-      // --- 2. BAND STEM SYNTHESIS (Bass + Electric Piano / Guitar Chords) ---
       const rootFreq = roots[barIndex % roots.length];
       const bassActive =
         subInBeat === 0 ||
@@ -736,7 +1072,7 @@ class DrumPracticeApp {
     return peaks.map((p) => Math.max(0.06, p / maxPeak));
   }
 
-  generateProceduralPeaks(song) {
+  generateProceduralPeaks() {
     const count = 260;
     this.bandPeaks = [];
     this.drumPeaks = [];
@@ -763,8 +1099,8 @@ class DrumPracticeApp {
     writeString(8, 'WAVE');
     writeString(12, 'fmt ');
     view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true); // PCM
-    view.setUint16(22, 1, true); // Mono
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
     view.setUint32(24, sampleRate, true);
     view.setUint32(28, sampleRate * 2, true);
     view.setUint16(32, 2, true);
@@ -782,7 +1118,7 @@ class DrumPracticeApp {
     return URL.createObjectURL(blob);
   }
 
-  // --- TRANSPORT, COUNT-IN & METRONOME ---
+  // --- TRANSPORT, COUNT-IN & SAMPLE-ACCURATE METRONOME ---
 
   togglePlayPause() {
     if (this.isCountingIn) {
@@ -809,7 +1145,6 @@ class DrumPracticeApp {
     const effectiveBpm = this.getEffectiveBpm();
     const intervalMs = (60 / effectiveBpm) * 1000;
 
-    // Render dots
     this.dom.countInDots.innerHTML = '';
     for (let i = 0; i < beats; i++) {
       const dot = document.createElement('div');
@@ -830,8 +1165,7 @@ class DrumPracticeApp {
       const dots = this.dom.countInDots.querySelectorAll('.count-dot');
       dots.forEach((d, idx) => d.classList.toggle('lit', idx <= step));
 
-      // Play high count-in stick click
-      this.triggerClickSound(step === 0, true);
+      this.scheduleClickSoundAt(this.audioCtx.currentTime, step === 0, true);
       this.highlightBeatLed(step);
 
       step++;
@@ -858,7 +1192,8 @@ class DrumPracticeApp {
       this.seekTo(startTarget);
     }
 
-    this.lastBeatIndex = -1;
+    this.lastScheduledBeatIndex = -99999;
+    this.lastVisualBeatIndex = -99999;
     this.bandAudio.play().catch(() => {});
     if (this.hasSeparateDrums) {
       this.drumsAudio.currentTime = this.bandAudio.currentTime;
@@ -902,7 +1237,8 @@ class DrumPracticeApp {
     if (this.hasSeparateDrums) {
       this.drumsAudio.currentTime = clamped;
     }
-    this.lastBeatIndex = -1;
+    this.lastScheduledBeatIndex = -99999;
+    this.lastVisualBeatIndex = -99999;
     this.updatePlayheadUi(clamped);
   }
 
@@ -925,32 +1261,35 @@ class DrumPracticeApp {
 
   getEffectiveBpm() {
     const base = this.activeSong ? this.activeSong.bpm : 120;
-    return Math.round(base * (this.tempoPercent / 100));
+    return Number((base * (this.tempoPercent / 100)).toFixed(1));
   }
 
-  triggerClickSound(isDownbeat, forceAudible = false) {
+  /**
+   * Schedules a studio woodblock/click tone at an exact Web Audio hardware timestamp (`when`).
+   */
+  scheduleClickSoundAt(when, isDownbeat, forceAudible = false) {
     if (!forceAudible && (this.clickMuted || this.clickVolume <= 0.01)) return;
     this.ensureAudioContext();
 
-    const now = this.audioCtx.currentTime;
+    const startTime = Math.max(this.audioCtx.currentTime, when);
     const osc = this.audioCtx.createOscillator();
     const gain = this.audioCtx.createGain();
 
     osc.type = 'triangle';
-    osc.frequency.setValueAtTime(isDownbeat ? 1480 : 980, now);
-    osc.frequency.exponentialRampToValueAtTime(isDownbeat ? 740 : 490, now + 0.035);
+    osc.frequency.setValueAtTime(isDownbeat ? 1560 : 1020, startTime);
+    osc.frequency.exponentialRampToValueAtTime(isDownbeat ? 760 : 510, startTime + 0.032);
 
-    const vol = forceAudible ? Math.max(0.5, this.clickVolume) : this.clickVolume;
-    gain.gain.setValueAtTime(vol * (isDownbeat ? 0.55 : 0.35), now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.045);
+    const vol = forceAudible ? Math.max(0.55, this.clickVolume) : this.clickVolume;
+    gain.gain.setValueAtTime(vol * (isDownbeat ? 0.62 : 0.4), startTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.042);
 
     osc.connect(gain);
     gain.connect(this.audioCtx.destination);
-    osc.start(now);
-    osc.stop(now + 0.05);
+    osc.start(startTime);
+    osc.stop(startTime + 0.045);
   }
 
-  // --- REALTIME LOOP & METRONOME ENGINE ---
+  // --- REALTIME LOOP & SAMPLE-ACCURATE LOOKAHEAD METRONOME ---
 
   startRenderLoop() {
     const tick = () => {
@@ -959,34 +1298,69 @@ class DrumPracticeApp {
         const dur = this.getDuration();
 
         // Keep Drum stem tightly phase-synced with Band stem
-        if (this.hasSeparateDrums && Math.abs(this.drumsAudio.currentTime - cur) > 0.035) {
+        if (this.hasSeparateDrums && Math.abs(this.drumsAudio.currentTime - cur) > 0.03) {
           this.drumsAudio.currentTime = cur;
         }
 
         // Check A-B Loop boundary
         if (this.loopEnabled && cur >= this.loopB) {
           this.onLoopCompleted();
-        } else if (cur >= dur - 0.05) {
+          this.rafId = requestAnimationFrame(tick);
+          return;
+        } else if (cur >= dur - 0.04) {
           this.seekTo(this.loopEnabled ? this.getEffectiveLoopStart() : 0);
           if (!this.loopEnabled) this.pausePlayback();
+          this.rafId = requestAnimationFrame(tick);
+          return;
         }
 
-        // Calculate Beat & Bar position
+        // Phase-locked Beat & Bar calculation relative to song.beatOffset
+        const beatOffset = this.activeSong.beatOffset || 0;
         const beatDurationSongTime = 60 / this.activeSong.bpm;
-        const currentBeatTotal = Math.floor(cur / beatDurationSongTime);
-        if (currentBeatTotal !== this.lastBeatIndex && cur >= 0) {
-          this.lastBeatIndex = currentBeatTotal;
-          const beatsPerBar = this.activeSong.beatsPerBar || 4;
-          const beatInBar = ((currentBeatTotal % beatsPerBar) + beatsPerBar) % beatsPerBar;
-          const barNumber = Math.floor(currentBeatTotal / beatsPerBar) + 1;
+        const playbackRate = this.tempoPercent / 100;
+        const relSongTime = cur - beatOffset;
+        const exactBeatFloat = relSongTime / beatDurationSongTime;
+        const currentBeatIndex = Math.floor(exactBeatFloat + 0.002);
+        const beatsPerBar = this.activeSong.beatsPerBar || 4;
 
-          this.dom.currentBarDisplay.textContent = `TAKT ${barNumber}`;
+        // 1. Update visual Beat LEDs when crossing a beat
+        if (currentBeatIndex !== this.lastVisualBeatIndex && relSongTime >= -0.02) {
+          this.lastVisualBeatIndex = currentBeatIndex;
+          const beatInBar = ((currentBeatIndex % beatsPerBar) + beatsPerBar) % beatsPerBar;
+          const barNumber = Math.floor(currentBeatIndex / beatsPerBar) + 1;
+
+          this.dom.currentBarDisplay.textContent = `TAKT ${Math.max(1, barNumber)}`;
           this.dom.currentBeatLabel.textContent = `BEAT ${beatInBar + 1}`;
           this.highlightBeatLed(beatInBar);
-          this.triggerClickSound(beatInBar === 0, false);
+
+          // If currentBeatIndex wasn't lookahead-scheduled yet (e.g. right after seek/start), play immediately
+          if (currentBeatIndex > this.lastScheduledBeatIndex && this.audioCtx) {
+            this.lastScheduledBeatIndex = currentBeatIndex;
+            this.scheduleClickSoundAt(this.audioCtx.currentTime, beatInBar === 0, false);
+          }
         }
 
-        this.updatePlayheadUi(this.bandAudio.currentTime);
+        // 2. Sample-Accurate Lookahead Scheduling for upcoming beat (within next 45ms of real time)
+        if (this.audioCtx) {
+          const nextBeatIndex = Math.ceil(exactBeatFloat);
+          if (nextBeatIndex > this.lastScheduledBeatIndex && nextBeatIndex >= 0) {
+            const nextBeatSongTime = beatOffset + nextBeatIndex * beatDurationSongTime;
+            const songDeltaSec = nextBeatSongTime - cur;
+            const realDeltaSec = songDeltaSec / playbackRate;
+
+            if (realDeltaSec >= -0.005 && realDeltaSec <= 0.045) {
+              this.lastScheduledBeatIndex = nextBeatIndex;
+              const nextBeatInBar = ((nextBeatIndex % beatsPerBar) + beatsPerBar) % beatsPerBar;
+              this.scheduleClickSoundAt(
+                this.audioCtx.currentTime + Math.max(0, realDeltaSec),
+                nextBeatInBar === 0,
+                false
+              );
+            }
+          }
+        }
+
+        this.updatePlayheadUi(cur);
       }
 
       this.rafId = requestAnimationFrame(tick);
@@ -999,7 +1373,6 @@ class DrumPracticeApp {
     this.loopPassCount++;
     this.dom.loopCounterBadge.textContent = `Durchgang #${this.loopPassCount}`;
 
-    // Speed-Trainer Auto-Increment
     if (this.speedTrainerEnabled && this.tempoPercent < this.trainerTarget) {
       if (this.loopPassCount % this.trainerInterval === 0) {
         const nextTempo = Math.min(this.trainerTarget, this.tempoPercent + this.trainerStep);
@@ -1009,6 +1382,90 @@ class DrumPracticeApp {
 
     const restartPos = this.getEffectiveLoopStart();
     this.seekTo(restartPos);
+  }
+
+  // --- BPM, TAP-TEMPO & PHASE CALIBRATION ---
+
+  setSongBpm(newBpm) {
+    if (!this.activeSong) return;
+    const clamped = Math.max(40, Math.min(260, Number(Number(newBpm).toFixed(1))));
+    if (!isFinite(clamped)) return;
+    this.activeSong.bpm = clamped;
+    this.lastScheduledBeatIndex = -99999;
+    this.saveSongState(this.activeSong);
+    this.updateTempoUi();
+    this.updateSyncCalibrationUi();
+    this.renderSongList();
+    this.drawWaveform();
+  }
+
+  nudgeBeatOffset(deltaSeconds) {
+    if (!this.activeSong) return;
+    const beatDur = 60 / this.activeSong.bpm;
+    let nextOffset = (this.activeSong.beatOffset || 0) + deltaSeconds;
+    // Keep offset positive and reasonable
+    if (nextOffset < 0) {
+      nextOffset = ((nextOffset % beatDur) + beatDur) % beatDur;
+    }
+    this.activeSong.beatOffset = Number(nextOffset.toFixed(3));
+    this.lastScheduledBeatIndex = -99999;
+    this.saveSongState(this.activeSong);
+    this.updateSyncCalibrationUi();
+    this.drawWaveform();
+  }
+
+  syncDownbeatAtCurrentTime() {
+    if (!this.activeSong) return;
+    const cur = this.bandAudio.currentTime;
+    const barDur = this.getOneBarSeconds();
+    // Modulo one bar so Beat 1 of the bar lands right on `cur`, while early bars still get clicks
+    const phaseInBar = ((cur % barDur) + barDur) % barDur;
+    this.activeSong.beatOffset = Number(phaseInBar.toFixed(3));
+    this.lastScheduledBeatIndex = -99999;
+    this.lastVisualBeatIndex = -99999;
+    this.saveSongState(this.activeSong);
+    this.updateSyncCalibrationUi();
+    this.drawWaveform();
+    this.ensureAudioContext();
+    this.scheduleClickSoundAt(this.audioCtx.currentTime, true, true);
+  }
+
+  registerTapTempo() {
+    const now = performance.now();
+    if (this.tapTimes.length > 0 && now - this.tapTimes[this.tapTimes.length - 1] > 2500) {
+      this.tapTimes = [];
+    }
+    this.tapTimes.push(now);
+    if (this.tapTimes.length > 8) {
+      this.tapTimes.shift();
+    }
+
+    this.ensureAudioContext();
+    this.scheduleClickSoundAt(this.audioCtx.currentTime, this.tapTimes.length === 1, true);
+
+    if (this.tapTimes.length >= 2) {
+      let sumIntervals = 0;
+      for (let i = 1; i < this.tapTimes.length; i++) {
+        sumIntervals += this.tapTimes[i] - this.tapTimes[i - 1];
+      }
+      const avgMs = sumIntervals / (this.tapTimes.length - 1);
+      const tappedEffectiveBpm = 60000 / avgMs;
+      // Convert from effective playback speed back to original song BPM
+      const origBpm = Math.round((tappedEffectiveBpm / (this.tempoPercent / 100)) * 2) / 2;
+      this.setSongBpm(origBpm);
+    }
+  }
+
+  updateSyncCalibrationUi() {
+    if (!this.activeSong) return;
+    if (this.dom.liveBpmInput) {
+      this.dom.liveBpmInput.value = String(this.activeSong.bpm);
+    }
+    if (this.dom.beatOffsetLabel) {
+      const off = this.activeSong.beatOffset || 0;
+      this.dom.beatOffsetLabel.textContent = `Grid-Start: +${off.toFixed(3)}s`;
+    }
+    this.dom.activeOrigBpm.textContent = `${this.activeSong.bpm} BPM`;
   }
 
   // --- UI RENDERERS & UPDATERS ---
@@ -1109,7 +1566,6 @@ class DrumPracticeApp {
     this.dom.loopRegionOverlay.style.left = `${leftPct}%`;
     this.dom.loopRegionOverlay.style.width = `${widthPct}%`;
 
-    // Pre-Roll visualization
     if (this.loopEnabled && this.prerollEnabled && this.loopA > 0.2) {
       const preStart = this.getEffectiveLoopStart();
       const preLeftPct = (preStart / dur) * 100;
@@ -1167,17 +1623,25 @@ class DrumPracticeApp {
   }
 
   applyMixerVolumes() {
-    this.bandAudio.volume = this.bandMuted ? 0 : this.bandVolume;
-    this.drumsAudio.volume = this.drumsMuted ? 0 : this.drumsVolume;
+    this.bandAudio.volume = 1.0;
+    this.drumsAudio.volume = 0.85;
 
-    this.dom.drumsVolLabel.textContent = this.drumsMuted ? 'STUMM' : `${Math.round(this.drumsVolume * 100)}%`;
-    this.dom.bandVolLabel.textContent = this.bandMuted ? 'STUMM' : `${Math.round(this.bandVolume * 100)}%`;
-    this.dom.clickVolLabel.textContent = this.clickMuted ? 'STUMM' : `${Math.round(this.clickVolume * 100)}%`;
-
-    this.dom.muteDrumsBtn.classList.toggle('muted', this.drumsMuted);
-    this.dom.muteBandBtn.classList.toggle('muted', this.bandMuted);
-    this.dom.muteClickBtn.classList.toggle('muted', this.clickMuted);
-    this.dom.drumlessQuickBtn.classList.toggle('active', this.drumsMuted);
+    const clickActive = !this.clickMuted;
+    if (this.dom.muteClickBtn) {
+      this.dom.muteClickBtn.classList.toggle('active', clickActive);
+      this.dom.muteClickBtn.classList.toggle('muted', !clickActive);
+      this.dom.muteClickBtn.setAttribute('aria-pressed', String(clickActive));
+    }
+    if (this.dom.clickToggleIcon) {
+      this.dom.clickToggleIcon.textContent = clickActive ? '🔔' : '🔕';
+    }
+    if (this.dom.clickToggleTitle) {
+      this.dom.clickToggleTitle.textContent = clickActive ? 'CLICK: AN' : 'CLICK: AUS';
+    }
+    if (this.dom.clickStatusBadge) {
+      this.dom.clickStatusBadge.textContent = clickActive ? 'Click Synchronisiert' : 'Click Stumm';
+      this.dom.clickStatusBadge.classList.toggle('active', clickActive);
+    }
 
     this.drawWaveform();
   }
@@ -1199,13 +1663,19 @@ class DrumPracticeApp {
     const midY = height / 2;
     const dur = this.getDuration();
 
-    // Draw Bar Grid lines
+    // Draw Phase-Aligned Beat & Bar Grid Lines (aligned to song.beatOffset)
     if (this.activeSong && dur > 0) {
-      const barSec = this.getOneBarSeconds();
-      ctx.strokeStyle = 'rgba(148, 163, 184, 0.1)';
-      ctx.lineWidth = 1;
-      for (let t = 0; t < dur; t += barSec) {
+      const beatSec = 60 / this.activeSong.bpm;
+      const beatsPerBar = this.activeSong.beatsPerBar || 4;
+      const offset = this.activeSong.beatOffset || 0;
+
+      let beatIdx = 0;
+      for (let t = offset; t < dur; t += beatSec, beatIdx++) {
+        if (t < 0) continue;
         const x = (t / dur) * width;
+        const isBarLine = beatIdx % beatsPerBar === 0;
+        ctx.strokeStyle = isBarLine ? 'rgba(56, 189, 248, 0.28)' : 'rgba(148, 163, 184, 0.08)';
+        ctx.lineWidth = isBarLine ? 1.5 : 1;
         ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, height);
@@ -1223,12 +1693,10 @@ class DrumPracticeApp {
       const bandAmp = (this.bandPeaks[i] || 0.1) * (this.bandMuted ? 0.15 : this.bandVolume);
       const drumAmp = (this.drumPeaks[i] || 0.1) * (this.drumsMuted ? 0.08 : this.drumsVolume);
 
-      // Band stem bar
       const bh = Math.max(3, bandAmp * (height * 0.8));
       ctx.fillStyle = this.bandMuted ? 'rgba(100, 116, 139, 0.3)' : 'rgba(56, 189, 248, 0.65)';
       ctx.fillRect(x, midY - bh / 2, barWidth, bh);
 
-      // Drum transients overlay
       if (!this.drumsMuted) {
         const dh = Math.max(2, drumAmp * (height * 0.72));
         ctx.fillStyle = 'rgba(245, 158, 11, 0.75)';
@@ -1259,12 +1727,10 @@ class DrumPracticeApp {
   bindEvents() {
     window.addEventListener('resize', () => this.drawWaveform());
 
-    // Mobile sidebar toggle
     this.dom.toggleSidebarBtn.addEventListener('click', () => {
       this.dom.sidebar.classList.toggle('open');
     });
 
-    // Search & Filter Tags
     this.dom.librarySearch.addEventListener('input', (e) => {
       this.searchQuery = e.target.value;
       this.renderSongList();
@@ -1279,16 +1745,16 @@ class DrumPracticeApp {
       this.renderSongList();
     });
 
-    // Giant Transport Buttons
     this.dom.playPauseBtn.addEventListener('click', () => this.togglePlayPause());
     this.dom.restartLoopBtn.addEventListener('click', () => this.restartLoopOrSong());
     this.dom.countInBtn.addEventListener('click', () => {
       this.countInEnabled = !this.countInEnabled;
       this.dom.countInBtn.classList.toggle('active', this.countInEnabled);
       this.dom.countInBtn.setAttribute('aria-pressed', String(this.countInEnabled));
-      this.dom.countInBtn.querySelector('.giant-label').textContent = this.countInEnabled
-        ? 'VORZÄHLER: AN'
-        : 'VORZÄHLER: AUS';
+      const labelEl = this.dom.countInBtn.querySelector('.pad-title');
+      if (labelEl) {
+        labelEl.textContent = this.countInEnabled ? 'VORZÄHLER: AN' : 'VORZÄHLER: AUS';
+      }
     });
 
     // A-B Loop Controls
@@ -1368,7 +1834,7 @@ class DrumPracticeApp {
       }
     });
 
-    // Add Custom Marker at Current Position
+    // Add Custom Marker
     this.dom.addMarkerBtn.addEventListener('click', () => {
       if (!this.activeSong) return;
       const cur = this.bandAudio.currentTime;
@@ -1413,40 +1879,33 @@ class DrumPracticeApp {
       this.updateTempoUi();
     });
 
-    // Mixer Controls
-    this.dom.drumsVolSlider.addEventListener('input', (e) => {
-      this.drumsVolume = Number(e.target.value) / 100;
-      if (this.drumsVolume > 0) this.drumsMuted = false;
-      this.applyMixerVolumes();
-    });
-    this.dom.muteDrumsBtn.addEventListener('click', () => {
-      this.drumsMuted = !this.drumsMuted;
-      this.applyMixerVolumes();
-    });
-    this.dom.drumlessQuickBtn.addEventListener('click', () => {
-      this.drumsMuted = !this.drumsMuted;
-      this.applyMixerVolumes();
-    });
-
-    this.dom.bandVolSlider.addEventListener('input', (e) => {
-      this.bandVolume = Number(e.target.value) / 100;
-      if (this.bandVolume > 0) this.bandMuted = false;
-      this.applyMixerVolumes();
-    });
-    this.dom.muteBandBtn.addEventListener('click', () => {
-      this.bandMuted = !this.bandMuted;
-      this.applyMixerVolumes();
-    });
-
-    this.dom.clickVolSlider.addEventListener('input', (e) => {
-      this.clickVolume = Number(e.target.value) / 100;
-      if (this.clickVolume > 0) this.clickMuted = false;
-      this.applyMixerVolumes();
-    });
+    // Click-Track On/Off Toggle
     this.dom.muteClickBtn.addEventListener('click', () => {
       this.clickMuted = !this.clickMuted;
       this.applyMixerVolumes();
     });
+
+    // Precision BPM & Beat-Grid Sync Controls
+    this.dom.autoDetectActiveBtn.addEventListener('click', () => this.autoAnalyzeActiveSong());
+    this.dom.tapTempoBtn.addEventListener('click', () => this.registerTapTempo());
+    this.dom.bpmDecBtn.addEventListener('click', () => {
+      if (this.activeSong) this.setSongBpm(this.activeSong.bpm - 0.5);
+    });
+    this.dom.bpmIncBtn.addEventListener('click', () => {
+      if (this.activeSong) this.setSongBpm(this.activeSong.bpm + 0.5);
+    });
+    this.dom.liveBpmInput.addEventListener('change', (e) => {
+      this.setSongBpm(Number(e.target.value));
+    });
+    this.dom.bpmHalfBtn.addEventListener('click', () => {
+      if (this.activeSong) this.setSongBpm(this.activeSong.bpm / 2);
+    });
+    this.dom.bpmDoubleBtn.addEventListener('click', () => {
+      if (this.activeSong) this.setSongBpm(this.activeSong.bpm * 2);
+    });
+    this.dom.nudgeLeftBtn.addEventListener('click', () => this.nudgeBeatOffset(-0.01));
+    this.dom.nudgeRightBtn.addEventListener('click', () => this.nudgeBeatOffset(0.01));
+    this.dom.syncDownbeatHereBtn.addEventListener('click', () => this.syncDownbeatAtCurrentTime());
 
     // Song Notes Persistence
     this.dom.songNotesArea.addEventListener('input', (e) => {
@@ -1467,45 +1926,61 @@ class DrumPracticeApp {
       });
     });
 
-    // Upload Custom Audio Modal
-    const closeUpload = () => this.dom.uploadModal.classList.add('hidden');
+    // Upload Custom Audio Modal + Automatic BPM Analysis on File Select
+    const closeUpload = () => {
+      this.dom.uploadModal.classList.add('hidden');
+      this.dom.bpmDetectStatus.classList.add('hidden');
+    };
     this.dom.openUploadModalBtn.addEventListener('click', () => {
       this.dom.uploadModal.classList.remove('hidden');
     });
     this.dom.closeModalBtn.addEventListener('click', closeUpload);
     this.dom.cancelModalBtn.addEventListener('click', closeUpload);
 
+    this.dom.bandFileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const titleInput = document.getElementById('songTitleInput');
+      if (!titleInput.value.trim()) {
+        titleInput.value = file.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ');
+      }
+      await this.analyzeUploadedFileInModal(file);
+    });
+
+    this.dom.reanalyzeModalBtn.addEventListener('click', async () => {
+      const file = this.dom.bandFileInput.files[0];
+      if (file) {
+        await this.analyzeUploadedFileInModal(file);
+      }
+    });
+
     this.dom.addSongForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const title = document.getElementById('songTitleInput').value.trim();
       const subtitle = document.getElementById('songSubtitleInput').value.trim();
-      const bpm = Number(document.getElementById('songBpmInput').value) || 120;
+      const bpm = Number(this.dom.songBpmInput.value) || 120;
+      const beatOffset = Number(this.dom.songOffsetInput.value) || 0;
       const timeSignature = document.getElementById('songTimeSigInput').value;
       const category = document.getElementById('songCategoryInput').value;
-      const bandFile = document.getElementById('bandFileInput').files[0];
-      const drumsFile = document.getElementById('drumsFileInput').files[0];
+      const bandFile = this.dom.bandFileInput.files[0];
 
       if (!bandFile || !title) return;
 
       const beatsPerBar = parseInt(timeSignature.split('/')[0], 10) || 4;
       const bandUrl = URL.createObjectURL(bandFile);
-      const drumsUrl = drumsFile ? URL.createObjectURL(drumsFile) : null;
 
       let customPeaks = null;
+      let decodedDuration = 30;
       try {
         this.ensureAudioContext();
         const bandArrayBuf = await bandFile.arrayBuffer();
         const decodedBand = await this.audioCtx.decodeAudioData(bandArrayBuf.slice(0));
+        decodedDuration = decodedBand.duration || 30;
         const bPeaks = this.computePeaksFromArray(decodedBand.getChannelData(0), 260);
-        let dPeaks = bPeaks.map((v) => v * 0.7);
-        if (drumsFile) {
-          const drumArrayBuf = await drumsFile.arrayBuffer();
-          const decodedDrum = await this.audioCtx.decodeAudioData(drumArrayBuf.slice(0));
-          dPeaks = this.computePeaksFromArray(decodedDrum.getChannelData(0), 260);
-        }
+        const dPeaks = bPeaks.map((v) => v * 0.7);
         customPeaks = { band: bPeaks, drums: dPeaks };
       } catch {
-        // Fallback to procedural peaks if decoding fails
+        // Fallback to procedural peaks
       }
 
       const songMeta = {
@@ -1513,13 +1988,14 @@ class DrumPracticeApp {
         title,
         subtitle: subtitle || 'Eigener Upload',
         bpm,
+        beatOffset,
         timeSignature,
         beatsPerBar,
-        duration: 30,
+        duration: decodedDuration,
         tags: [category, 'In Arbeit'],
         rating: 2,
         customPeaks,
-        markers: [{ label: 'Start', time: 0, color: '#38bdf8' }],
+        markers: [{ label: 'Start', time: beatOffset, color: '#38bdf8' }],
         notes: ''
       };
 
@@ -1527,7 +2003,7 @@ class DrumPracticeApp {
         id: songMeta.id,
         songMeta,
         bandBlob: bandFile,
-        drumsBlob: drumsFile || null
+        drumsBlob: null
       });
 
       const newSong = {
@@ -1535,7 +2011,7 @@ class DrumPracticeApp {
         isCustomUpload: true,
         audio: {
           band: bandUrl,
-          drums: drumsUrl
+          drums: null
         }
       };
 
@@ -1577,9 +2053,12 @@ class DrumPracticeApp {
       } else if (e.key === 'm' || e.key === 'M') {
         e.preventDefault();
         this.dom.muteClickBtn.click();
-      } else if (e.key === 'd' || e.key === 'D') {
+      } else if (e.key === 't' || e.key === 'T') {
         e.preventDefault();
-        this.dom.muteDrumsBtn.click();
+        this.registerTapTempo();
+      } else if (e.key === 's' || e.key === 'S') {
+        e.preventDefault();
+        this.syncDownbeatAtCurrentTime();
       } else if (e.key === 'Escape' && this.isCountingIn) {
         this.cancelCountIn();
       }
