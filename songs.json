@@ -1,0 +1,101 @@
+[
+  {
+    "id": "neon-pocket-funk",
+    "title": "Neon Pocket Groove",
+    "subtitle": "Tight Ghost-Notes & Syncopated Kick",
+    "bpm": 108,
+    "timeSignature": "4/4",
+    "beatsPerBar": 4,
+    "duration": 35.55,
+    "tags": ["Funk", "Drumless", "In Arbeit"],
+    "rating": 3,
+    "demoSynth": "funk",
+    "audio": {
+      "band": null,
+      "drums": null
+    },
+    "markers": [
+      { "label": "Intro", "time": 0.0, "color": "#38bdf8" },
+      { "label": "Verse 1", "time": 8.89, "color": "#4ade80" },
+      { "label": "Chorus", "time": 17.78, "color": "#f59e0b" },
+      { "label": "Linear Fill / Solo", "time": 24.44, "color": "#f43f5e" },
+      { "label": "Outro", "time": 31.11, "color": "#a855f7" }
+    ],
+    "defaultLoop": { "a": 24.44, "b": 31.11 },
+    "notes": "Ghost-Notes auf der Snare extrem leise halten (unter 2cm Stick-Höhe). Im Linear Fill (Takt 12) Kick-Snare-Kick-Hat sauber trennen, nicht eilen!"
+  },
+  {
+    "id": "autobahn-overdrive",
+    "title": "Autobahn Overdrive",
+    "subtitle": "Driving 8th-Note Rock & Halftime Bridge",
+    "bpm": 142,
+    "timeSignature": "4/4",
+    "beatsPerBar": 4,
+    "duration": 33.8,
+    "tags": ["Rock", "Schnell (>130 BPM)", "In Arbeit"],
+    "rating": 4,
+    "demoSynth": "rock",
+    "audio": {
+      "band": null,
+      "drums": null
+    },
+    "markers": [
+      { "label": "Intro Riff", "time": 0.0, "color": "#38bdf8" },
+      { "label": "Verse", "time": 6.76, "color": "#4ade80" },
+      { "label": "Chorus (Crash Ride)", "time": 13.52, "color": "#f59e0b" },
+      { "label": "Halftime Bridge", "time": 20.28, "color": "#a855f7" },
+      { "label": "16th Tom Fill", "time": 27.04, "color": "#f43f5e" }
+    ],
+    "defaultLoop": { "a": 27.04, "b": 33.8 },
+    "notes": "Nach 2. Refrain Crash auf '1-und' mit Bass-Gitarrist zusammen akzentuieren! In der Halftime-Bridge Snare auf Zählzeit 3 fett als Rimshot spielen."
+  },
+  {
+    "id": "midnight-six-eight",
+    "title": "Midnight Soul Ballad",
+    "subtitle": "Slow 6/8 Purdie-Style Shuffle",
+    "bpm": 78,
+    "timeSignature": "6/8",
+    "beatsPerBar": 6,
+    "duration": 36.92,
+    "tags": ["Drumless", "Gelernt"],
+    "rating": 5,
+    "demoSynth": "ballad68",
+    "audio": {
+      "band": null,
+      "drums": null
+    },
+    "markers": [
+      { "label": "Intro (Cross-Stick)", "time": 0.0, "color": "#38bdf8" },
+      { "label": "Verse", "time": 9.23, "color": "#4ade80" },
+      { "label": "Chorus (Open Snare)", "time": 18.46, "color": "#f59e0b" },
+      { "label": "Dynamic Breakdown", "time": 27.69, "color": "#f43f5e" }
+    ],
+    "defaultLoop": { "a": 18.46, "b": 27.69 },
+    "notes": "Hi-Hat auf 1, 2, 3, 4, 5, 6 leicht wippen (Foot-Splash auf der 6). Backbeat sitzt auf der 4!"
+  },
+  {
+    "id": "double-kick-sprint",
+    "title": "Apex Endurance Protocol",
+    "subtitle": "Fast Punk / Metal Stamina Track",
+    "bpm": 168,
+    "timeSignature": "4/4",
+    "beatsPerBar": 4,
+    "duration": 28.57,
+    "tags": ["Rock", "Schnell (>130 BPM)", "In Arbeit"],
+    "rating": 2,
+    "demoSynth": "fast",
+    "audio": {
+      "band": null,
+      "drums": null
+    },
+    "markers": [
+      { "label": "Count & Blast", "time": 0.0, "color": "#38bdf8" },
+      { "label": "Gallop Verse", "time": 5.71, "color": "#4ade80" },
+      { "label": "Chorus", "time": 11.43, "color": "#f59e0b" },
+      { "label": "Herta Fill Section", "time": 17.14, "color": "#f43f5e" },
+      { "label": "Outro Breakdown", "time": 22.86, "color": "#a855f7" }
+    ],
+    "defaultLoop": { "a": 17.14, "b": 22.86 },
+    "notes": "Mit Speed-Trainer bei 75% starten (+2% alle 2 Loops). Schultern locker lassen, aus den Fußgelenken spielen!"
+  }
+]

@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0b0f17" />
+  <title>POCKET LAB // Drum Practice Player</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Count-In Overlay (Stick-Friendly Giant Visual Counter) -->
+  <div id="countInOverlay" class="count-in-overlay hidden" aria-live="polite">
+    <div class="count-in-box">
+      <div class="count-in-label">COUNT-IN VORZÄHLER</div>
+      <div id="countInNumber" class="count-in-number">1</div>
+      <div id="countInDots" class="count-in-dots"></div>
+      <div class="count-in-hint">Sticks bereitmachen · ESC oder Leertaste zum Abbrechen</div>
+    </div>
+  </div>
+
+  <!-- Custom Track Upload Modal -->
+  <div id="uploadModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Eigenen Übungs-Song hinzufügen</h2>
+        <button id="closeModalBtn" class="icon-btn" title="Schließen">✕</button>
+      </div>
+      <form id="addSongForm" class="modal-form">
+        <div class="form-row">
+          <div class="form-group">
+            <label for="songTitleInput">Song-Titel *</label>
+            <input type="text" id="songTitleInput" required placeholder="z. B. Rosanna - Half-Time Shuffle" />
+          </div>
+          <div class="form-group">
+            <label for="songSubtitleInput">Notiz / Fokus</label>
+            <input type="text" id="songSubtitleInput" placeholder="z. B. Ghost Notes & Bozzao Fill" />
+          </div>
+        </div>
+        <div class="form-row three-col">
+          <div class="form-group">
+            <label for="songBpmInput">Original BPM *</label>
+            <input type="number" id="songBpmInput" min="40" max="260" value="120" required />
+          </div>
+          <div class="form-group">
+            <label for="songTimeSigInput">Taktart</label>
+            <select id="songTimeSigInput">
+              <option value="4/4">4/4 Takt</option>
+              <option value="6/8">6/8 Takt</option>
+              <option value="3/4">3/4 Takt</option>
+              <option value="5/4">5/4 Takt</option>
+              <option value="7/8">7/8 Takt</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="songCategoryInput">Kategorie-Tag</label>
+            <select id="songCategoryInput">
+              <option value="Rock">Rock</option>
+              <option value="Funk">Funk</option>
+              <option value="Drumless">Drumless</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="bandFileInput">Audio-Datei: Band / Komplett-Mix / Drumless (MP3, WAV, OGG) *</label>
+          <input type="file" id="bandFileInput" accept="audio/*" required />
+        </div>
+        <div class="form-group">
+          <label for="drumsFileInput">Optional: Separate Original-Drum-Spur (Stem zum Stummschalten)</label>
+          <input type="file" id="drumsFileInput" accept="audio/*" />
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="cancelModalBtn" class="btn-secondary">Abbrechen</button>
+          <button type="submit" class="btn-primary">In Bibliothek speichern</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="app-layout">
+    <!-- LEFT SIDEBAR: Curated Song Library -->
+    <aside id="librarySidebar" class="sidebar">
+      <div class="brand-header">
+        <div class="brand-logo">
+          <span class="logo-pulse"></span>
+          <div>
+            <h1>POCKET LAB</h1>
+            <span class="brand-sub">DRUM PRACTICE WORKSTATION</span>
+          </div>
+        </div>
+        <button id="openUploadModalBtn" class="add-track-btn" title="Eigene MP3/WAV-Dateien dauerhaft laden">
+          + Track laden
+        </button>
+      </div>
+
+      <!-- Quick Live Filter -->
+      <div class="library-search-box">
+        <input
+          type="search"
+          id="librarySearch"
+          placeholder="Songs oder BPM filtern..."
+          autocomplete="off"
+        />
+      </div>
+
+      <!-- Filter Tags -->
+      <div class="filter-tags" id="filterTags">
+        <button class="tag-chip active" data-filter="ALL">Alle</button>
+        <button class="tag-chip" data-filter="Rock">Rock</button>
+        <button class="tag-chip" data-filter="Funk">Funk</button>
+        <button class="tag-chip" data-filter="Drumless">Drumless</button>
+        <button class="tag-chip" data-filter="FAST">Schnell (&gt;130)</button>
+        <button class="tag-chip" data-filter="In Arbeit">In Arbeit</button>
+        <button class="tag-chip" data-filter="Gelernt">Gelernt ★</button>
+      </div>
+
+      <!-- Song List -->
+      <div id="songList" class="song-list" role="listbox" aria-label="Song-Bibliothek"></div>
+
+      <!-- Pedal / Keyboard Shortcut Footer -->
+      <div class="sidebar-footer">
+        <div class="pedal-badge">
+          <span class="dot-online"></span>
+          <span>Fußpedal &amp; Tastatur aktiv</span>
+        </div>
+        <div class="shortcut-grid">
+          <span><kbd>Space</kbd> / <kbd>PgDn</kbd> Play</span>
+          <span><kbd>←</kbd> / <kbd>PgUp</kbd> Loop Start</span>
+          <span><kbd>A</kbd> / <kbd>B</kbd> Loop A/B</span>
+          <span><kbd>C</kbd> Vorzähler (4x)</span>
+          <span><kbd>M</kbd> Click An/Aus</span>
+          <span><kbd>D</kbd> Drums Mute</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- MAIN WORKSPACE: The Drum Player -->
+    <main class="player-main">
+      <!-- Top Status & Track Header -->
+      <header class="track-header">
+        <div class="track-title-group">
+          <button id="toggleSidebarBtn" class="mobile-menu-btn" title="Bibliothek ein-/ausblenden">☰</button>
+          <div>
+            <div class="track-badges">
+              <span id="activeTimeSig" class="pill-badge sig-badge">4/4</span>
+              <span id="activeOrigBpm" class="pill-badge bpm-badge">108 BPM</span>
+              <span id="activeEffectiveBpm" class="pill-badge eff-bpm-badge">Effektiv: 108 BPM (100%)</span>
+            </div>
+            <h2 id="activeSongTitle">Neon Pocket Groove</h2>
+            <p id="activeSongSubtitle" class="track-subtitle">Tight Ghost-Notes &amp; Syncopated Kick</p>
+          </div>
+        </div>
+
+        <!-- Visual Metronome / Beat Indicator -->
+        <div class="beat-monitor" title="Optischer Takt-Monitor (1-2-3-4)">
+          <div class="beat-monitor-header">
+            <span id="currentBarDisplay">TAKT 1</span>
+            <span id="currentBeatLabel">BEAT 1</span>
+          </div>
+          <div id="beatLeds" class="beat-leds"></div>
+        </div>
+
+        <!-- Practice Rating (1-5 Stars) -->
+        <div class="track-rating-box">
+          <span class="rating-caption">Fortschritt ("Sitzt"):</span>
+          <div id="activeSongStars" class="star-group" role="radiogroup" aria-label="Übungs-Fortschritt"></div>
+        </div>
+      </header>
+
+      <!-- 1. INTERACTIVE WAVEFORM & SONG MARKERS -->
+      <section class="waveform-section">
+        <div class="waveform-toolbar">
+          <div class="time-readout">
+            <span id="currentTimeDisplay" class="time-current">00:00.0</span>
+            <span class="time-sep">/</span>
+            <span id="totalTimeDisplay" class="time-total">00:35.5</span>
+          </div>
+
+          <!-- Song Section Markers -->
+          <div id="markerBar" class="marker-bar" aria-label="Song-Abschnitte"></div>
+
+          <button id="addMarkerBtn" class="add-marker-btn" title="Aktuelle Position als Song-Marker speichern (+)">
+            + Marker hier
+          </button>
+        </div>
+
+        <div id="waveformContainer" class="waveform-container">
+          <canvas id="waveformCanvas"></canvas>
+          <div id="loopRegionOverlay" class="loop-region-overlay hidden">
+            <div class="loop-handle loop-handle-a" id="loopHandleA" title="Loop Start A ziehen"><span>A</span></div>
+            <div class="loop-region-label" id="loopRegionBadge">A–B LOOP</div>
+            <div class="loop-handle loop-handle-b" id="loopHandleB" title="Loop Ende B ziehen"><span>B</span></div>
+          </div>
+          <div id="prerollRegionOverlay" class="preroll-region-overlay hidden">
+            <span>1 TAKT PRE-ROLL</span>
+          </div>
+          <div id="playheadLine" class="playhead-line"></div>
+        </div>
+        <div class="waveform-hint">
+          <span>Klick in Wellenform = Springen · Marker anklicken = Abschnitt wählen · Doppelklick auf Marker = Abschnitt direkt als A–B Loop isolieren</span>
+        </div>
+      </section>
+
+      <!-- 2. STICK-FRIENDLY GIANT TRANSPORT & A-B LOOP DECK -->
+      <section class="transport-loop-grid">
+        <!-- Giant Transport Controls -->
+        <div class="panel-card transport-card">
+          <div class="panel-title-row">
+            <h3>TRANSPORT &amp; VORZÄHLER</h3>
+            <span class="panel-hint">Fußpedal-kompatibel</span>
+          </div>
+
+          <div class="giant-transport-buttons">
+            <button id="playPauseBtn" class="giant-btn play-btn" aria-label="Play oder Pause (Leertaste)">
+              <span id="playPauseIcon" class="giant-icon">▶</span>
+              <span id="playPauseText" class="giant-label">PLAY</span>
+              <kbd>Leertaste</kbd>
+            </button>
+
+            <button id="restartLoopBtn" class="giant-btn restart-btn" aria-label="Zum Loop-Anfang A oder Song-Start springen">
+              <span class="giant-icon">↺</span>
+              <span class="giant-label">AB PUNKT A</span>
+              <kbd>← / Pedal L</kbd>
+            </button>
+
+            <button id="countInBtn" class="giant-btn countin-btn active" aria-pressed="true" title="Gibt vor dem Start 1 Takt Klick-Vorzähler aus, damit du die Sticks in Position bringen kannst">
+              <span class="giant-icon">1·2·3·4</span>
+              <span class="giant-label">VORZÄHLER: AN</span>
+              <kbd>Taste C</kbd>
+            </button>
+          </div>
+        </div>
+
+        <!-- A-B Loop Station -->
+        <div class="panel-card loop-card">
+          <div class="panel-title-row">
+            <h3>A–B LOOP ISOLATOR</h3>
+            <span id="loopCounterBadge" class="loop-pass-badge">Durchgang #0</span>
+          </div>
+
+          <div class="ab-buttons-row">
+            <button id="setABtn" class="ab-btn set-a-btn">
+              <span class="ab-title">[ LOOP START A ]</span>
+              <span id="loopATimeText" class="ab-time">00:24.4</span>
+              <kbd>Taste A</kbd>
+            </button>
+
+            <button id="setBBtn" class="ab-btn set-b-btn">
+              <span class="ab-title">[ LOOP ENDE B ]</span>
+              <span id="loopBTimeText" class="ab-time">00:31.1</span>
+              <kbd>Taste B</kbd>
+            </button>
+
+            <button id="toggleLoopBtn" class="ab-btn toggle-loop-btn active" aria-pressed="true">
+              <span class="ab-title">LOOP AKTIV</span>
+              <span id="loopStateSub" class="ab-time">Endlos wiederholen</span>
+              <kbd>Taste L</kbd>
+            </button>
+
+            <button id="clearLoopBtn" class="ab-btn clear-loop-btn" title="Ganzen Song spielen">
+              <span class="ab-title">RESET</span>
+              <span class="ab-time">Ganzer Song</span>
+            </button>
+          </div>
+
+          <div class="loop-options-bar">
+            <label class="toggle-switch-label">
+              <input type="checkbox" id="prerollToggle" />
+              <span class="switch-ui"></span>
+              <span><strong>Pre-Roll (1 Takt Vorlauf):</strong> Startet 1 Takt vor Punkt A zum Einzählen im Fluss</span>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. TEMPO, SPEED-TRAINER, STEMS MIXER & NOTES -->
+      <section class="bottom-tools-grid">
+        <!-- Pitch-Neutral Tempo & Speed Trainer -->
+        <div class="panel-card tempo-card">
+          <div class="panel-title-row">
+            <h3>TEMPO (PITCH-NEUTRAL) &amp; SPEED-TRAINER</h3>
+            <span id="tempoPercentBadge" class="accent-readout">100% · 108 BPM</span>
+          </div>
+
+          <div class="tempo-slider-row">
+            <button id="tempoMinusBtn" class="step-btn" title="-2% langsamer">−2%</button>
+            <input
+              type="range"
+              id="tempoSlider"
+              min="50"
+              max="120"
+              step="1"
+              value="100"
+              aria-label="Tempo in Prozent (50% bis 120%)"
+            />
+            <button id="tempoPlusBtn" class="step-btn" title="+2% schneller">+2%</button>
+          </div>
+
+          <div class="tempo-presets">
+            <button class="preset-btn" data-tempo="60">60%</button>
+            <button class="preset-btn" data-tempo="75">75%</button>
+            <button class="preset-btn" data-tempo="85">85%</button>
+            <button class="preset-btn" data-tempo="90">90%</button>
+            <button class="preset-btn active" data-tempo="100">100%</button>
+            <button class="preset-btn" data-tempo="110">110%</button>
+          </div>
+
+          <!-- Speed Trainer Box -->
+          <div class="speed-trainer-box">
+            <div class="speed-trainer-top">
+              <label class="toggle-switch-label">
+                <input type="checkbox" id="speedTrainerToggle" />
+                <span class="switch-ui trainer-switch"></span>
+                <span><strong>Speed-Trainer Modus</strong> (Automatisch steigern im Loop)</span>
+              </label>
+              <span id="speedTrainerStatus" class="trainer-status">Aus</span>
+            </div>
+            <div class="speed-trainer-controls">
+              <div class="trainer-param">
+                <label for="trainerStepInput">Steigerung:</label>
+                <select id="trainerStepInput">
+                  <option value="1">+1% Tempo</option>
+                  <option value="2" selected>+2% Tempo (~2 BPM)</option>
+                  <option value="5">+5% Tempo</option>
+                </select>
+              </div>
+              <div class="trainer-param">
+                <label for="trainerIntervalInput">Intervall:</label>
+                <select id="trainerIntervalInput">
+                  <option value="1">Nach jedem Loop</option>
+                  <option value="2" selected>Alle 2 Loops</option>
+                  <option value="4">Alle 4 Loops</option>
+                </select>
+              </div>
+              <div class="trainer-param">
+                <label for="trainerTargetInput">Ziel-Tempo:</label>
+                <select id="trainerTargetInput">
+                  <option value="100" selected>100% (Original)</option>
+                  <option value="105">105%</option>
+                  <option value="110">110%</option>
+                  <option value="120">120% (Over-Speed)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Multi-Stem Mixer (Drums, Band, Click) -->
+        <div class="panel-card mixer-card">
+          <div class="panel-title-row">
+            <h3>SPUREN-MIXER (STEMS &amp; CLICK)</h3>
+            <button id="drumlessQuickBtn" class="quick-action-pill" title="Original-Drums sofort stummschalten (Taste D)">
+              Drumless-Modus (D)
+            </button>
+          </div>
+
+          <div class="mixer-channels">
+            <!-- Channel 1: Original Drums -->
+            <div class="mixer-row" id="channelDrums">
+              <div class="channel-info">
+                <span class="channel-name">Original-Drums</span>
+                <span id="drumsVolLabel" class="channel-val">85%</span>
+              </div>
+              <div class="channel-controls">
+                <input type="range" id="drumsVolSlider" min="0" max="100" value="85" />
+                <button id="muteDrumsBtn" class="mute-btn" title="Drums stummschalten für Drumless-Playalong">MUTE</button>
+              </div>
+            </div>
+
+            <!-- Channel 2: Restliche Band -->
+            <div class="mixer-row" id="channelBand">
+              <div class="channel-info">
+                <span class="channel-name">Restliche Band / Backing</span>
+                <span id="bandVolLabel" class="channel-val">100%</span>
+              </div>
+              <div class="channel-controls">
+                <input type="range" id="bandVolSlider" min="0" max="100" value="100" />
+                <button id="muteBandBtn" class="mute-btn" title="Band stummschalten (nur Click & Drums)">MUTE</button>
+              </div>
+            </div>
+
+            <!-- Channel 3: Metronome Click -->
+            <div class="mixer-row" id="channelClick">
+              <div class="channel-info">
+                <span class="channel-name">Click / Metronom</span>
+                <span id="clickVolLabel" class="channel-val">65%</span>
+              </div>
+              <div class="channel-controls">
+                <input type="range" id="clickVolSlider" min="0" max="100" value="65" />
+                <button id="muteClickBtn" class="mute-btn" title="Metronom-Klick ein-/ausschalten (Taste M)">MUTE</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Practice Notes per Song -->
+        <div class="panel-card notes-card">
+          <div class="panel-title-row">
+            <h3>PROBERAUM-NOTIZEN ZUM SONG</h3>
+            <span id="notesSavedIndicator" class="saved-badge">✓ Automatisch gespeichert</span>
+          </div>
+          <textarea
+            id="songNotesArea"
+            rows="4"
+            placeholder="Eigene Merkhilfen für diesen Track (z. B. 'Nach 2. Refrain Crash auf 1-und', 'Hi-Hat im Verse halboffen')..."
+          ></textarea>
+          <div class="quick-note-chips">
+            <button type="button" class="note-chip" data-snippet="Crash auf 1-und ">+ Crash auf 1-und</button>
+            <button type="button" class="note-chip" data-snippet="Hi-Hat halboffen ">+ Hi-Hat halboffen</button>
+            <button type="button" class="note-chip" data-snippet="Ghost-Notes leise! ">+ Ghost-Notes leise</button>
+            <button type="button" class="note-chip" data-snippet="Rimshot auf 2 & 4 ">+ Rimshot 2 &amp; 4</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "name": "POCKET LAB // Drum Practice Player",
+  "short_name": "DrumPlayer",
+  "description": "Kuratierter Drum-Practice-Player mit A-B Loop, Pre-Roll, Speed-Trainer, Stems-Mixer und Vorzähler.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#070a10",
+  "theme_color": "#0b0f17",
+  "orientation": "landscape"
+}
