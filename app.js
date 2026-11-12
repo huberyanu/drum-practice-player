@@ -1674,7 +1674,7 @@ class DrumPracticeApp {
         if (t < 0) continue;
         const x = (t / dur) * width;
         const isBarLine = beatIdx % beatsPerBar === 0;
-        ctx.strokeStyle = isBarLine ? 'rgba(56, 189, 248, 0.28)' : 'rgba(148, 163, 184, 0.08)';
+        ctx.strokeStyle = isBarLine ? 'rgba(2, 132, 199, 0.28)' : 'rgba(14, 165, 233, 0.1)';
         ctx.lineWidth = isBarLine ? 1.5 : 1;
         ctx.beginPath();
         ctx.moveTo(x, 0);
@@ -1683,7 +1683,7 @@ class DrumPracticeApp {
       }
     }
 
-    // Draw Waveform Bars (Band in Cyan, Drums in Amber overlay)
+    // Draw Waveform Bars (Light Ice-Blue + Deep Glacier-Blue overlay)
     const count = this.bandPeaks.length || 1;
     const barGap = width / count;
     const barWidth = Math.max(1.5, barGap * 0.68);
@@ -1694,28 +1694,26 @@ class DrumPracticeApp {
       const drumAmp = (this.drumPeaks[i] || 0.1) * (this.drumsMuted ? 0.08 : this.drumsVolume);
 
       const bh = Math.max(3, bandAmp * (height * 0.8));
-      ctx.fillStyle = this.bandMuted ? 'rgba(100, 116, 139, 0.3)' : 'rgba(56, 189, 248, 0.65)';
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.58)';
       ctx.fillRect(x, midY - bh / 2, barWidth, bh);
 
-      if (!this.drumsMuted) {
-        const dh = Math.max(2, drumAmp * (height * 0.72));
-        ctx.fillStyle = 'rgba(245, 158, 11, 0.75)';
-        ctx.fillRect(x, midY - dh / 2, barWidth, dh);
-      }
+      const dh = Math.max(2, drumAmp * (height * 0.72));
+      ctx.fillStyle = 'rgba(2, 132, 199, 0.82)';
+      ctx.fillRect(x, midY - dh / 2, barWidth, dh);
     }
 
     // Draw Section Marker Flags on Canvas
     if (this.activeSong && this.activeSong.markers && dur > 0) {
       this.activeSong.markers.forEach((m) => {
         const x = (m.time / dur) * width;
-        ctx.strokeStyle = m.color || '#38bdf8';
+        ctx.strokeStyle = '#0284c7';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, height);
         ctx.stroke();
 
-        ctx.fillStyle = m.color || '#38bdf8';
+        ctx.fillStyle = '#0369a1';
         ctx.font = '700 10px Inter, sans-serif';
         ctx.fillText(m.label, x + 5, 14);
       });
