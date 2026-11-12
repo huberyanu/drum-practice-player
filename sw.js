@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pocketlab-drum-player-v4';
+const CACHE_NAME = 'pocketlab-drum-player-v5';
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './songs.json', './manifest.json'];
 
 self.addEventListener('install', (event) => {
